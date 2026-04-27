@@ -5,18 +5,18 @@ import (
 	"fmt"
 	"time"
 
-	"golang.org/x/time/rate"
-
 	"go.octolab.org/toolset/tuna/internal/config"
+	"golang.org/x/time/rate"
 )
 
 // Router routes requests to appropriate providers based on model name.
 type Router struct {
-	providers       map[string]*Client       // name -> client
-	providerURLs    map[string]string        // name -> base URL
-	rateLimiters    map[string]*rate.Limiter // name -> rate limiter
-	aliases         map[string]string        // alias -> full model name
-	modelMapping    map[string]string        // model -> provider name
+	providers       map[string]*Client         // name -> client
+	providerURLs    map[string]string          // name -> base URL
+	providerConfigs map[string]config.Provider // name -> provider config
+	rateLimiters    map[string]*rate.Limiter   // name -> rate limiter
+	aliases         map[string]string          // alias -> full model name
+	modelMapping    map[string]string          // model -> provider name
 	defaultProvider string
 }
 
@@ -28,12 +28,12 @@ func NewRouter(cfg *config.Config) (*Router, error) {
 	r := &Router{
 		providers:       make(map[string]*Client),
 		providerURLs:    make(map[string]string),
+		providerConfigs: make(map[string]config.Provider),
 		rateLimiters:    make(map[string]*rate.Limiter),
 		aliases:         cfg.Aliases,
 		modelMapping:    make(map[string]string),
 		defaultProvider: cfg.DefaultProvider,
 	}
-
 	if r.aliases == nil {
 		r.aliases = make(map[string]string)
 	}
@@ -53,6 +53,7 @@ func NewRouter(cfg *config.Config) (*Router, error) {
 		})
 		r.providers[p.Name] = client
 		r.providerURLs[p.Name] = p.BaseURL
+		r.providerConfigs[p.Name] = p
 
 		// Create rate limiter if configured
 		if p.RateLimit != "" {
@@ -84,12 +85,10 @@ func (r *Router) Chat(ctx context.Context, req ChatRequest) (*ChatResponse, erro
 
 	// Find the provider for this model
 	providerName := r.resolveProvider(resolvedModel)
-
 	client, ok := r.providers[providerName]
 	if !ok {
 		return nil, fmt.Errorf("provider %q not found for model %q", providerName, req.Model)
 	}
-
 	providerURL := r.providerURLs[providerName]
 
 	// Wait for rate limiter if configured
@@ -102,11 +101,17 @@ func (r *Router) Chat(ctx context.Context, req ChatRequest) (*ChatResponse, erro
 	// Update request with resolved model name
 	req.Model = resolvedModel
 
+	// Apply model-specific provider options
+	if providerCfg, ok := r.providerConfigs[providerName]; ok {
+		if opt := providerCfg.FindModelOption(resolvedModel); opt != nil {
+			req.EnableThinking = opt.EnableThinking
+		}
+	}
+
 	// Time the actual API request (excluding rate limit wait)
 	start := time.Now()
 	resp, err := client.Chat(ctx, req)
 	duration := time.Since(start)
-
 	if err != nil {
 		return nil, err
 	}

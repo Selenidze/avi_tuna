@@ -1,12 +1,15 @@
 package llm
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
+	"strings"
 	"time"
-
-	api "github.com/sashabaranov/go-openai"
 )
 
 const (
@@ -24,12 +27,12 @@ type Config struct {
 func ConfigFromEnv() (*Config, error) {
 	token := os.Getenv(EnvAPIToken)
 	if token == "" {
-		return nil, fmt.Errorf("missing %s environment variable\n\nSet it with:\n  export %s=your-api-token", EnvAPIToken, EnvAPIToken)
+		return nil, fmt.Errorf("missing %s environment variable\n\nSet it with:\n export %s=your-api-token", EnvAPIToken, EnvAPIToken)
 	}
 
 	baseURL := os.Getenv(EnvBaseURL)
 	if baseURL == "" {
-		return nil, fmt.Errorf("missing %s environment variable\n\nSet it with:\n  export %s=https://api.example.com/v1", EnvBaseURL, EnvBaseURL)
+		return nil, fmt.Errorf("missing %s environment variable\n\nSet it with:\n export %s=https://api.example.com/v1", EnvBaseURL, EnvBaseURL)
 	}
 
 	return &Config{
@@ -40,61 +43,130 @@ func ConfigFromEnv() (*Config, error) {
 
 // Client wraps the OpenAI-compatible client for LLM interactions.
 type Client struct {
-	client *api.Client
+	httpClient *http.Client
+	apiToken   string
+	baseURL    string
 }
 
 // NewClient creates a new LLM client with the given configuration.
 func NewClient(cfg *Config) *Client {
-	config := api.DefaultConfig(cfg.APIToken)
-	config.BaseURL = cfg.BaseURL
-
 	return &Client{
-		client: api.NewClientWithConfig(config),
+		httpClient: &http.Client{Timeout: 120 * time.Second},
+		apiToken:   cfg.APIToken,
+		baseURL:    strings.TrimRight(cfg.BaseURL, "/"),
 	}
 }
 
 // ChatRequest holds parameters for a chat completion request.
 type ChatRequest struct {
-	Model        string
-	SystemPrompt string
-	UserMessage  string
-	Temperature  float64
-	MaxTokens    int
+	Model          string
+	SystemPrompt   string
+	UserMessage    string
+	Temperature    float64
+	MaxTokens      int
+	EnableThinking *bool
 }
 
 // ChatResponse holds the response from a chat completion.
 type ChatResponse struct {
 	Content      string
-	Model        string        // Resolved model name from API response
-	ProviderURL  string        // Provider base URL (set by Router)
+	Model        string // Resolved model name from API response
+	ProviderURL  string // Provider base URL (set by Router)
 	PromptTokens int
 	OutputTokens int
 	Duration     time.Duration // Request execution time (set by Router)
 }
 
+type chatTemplateKwargs struct {
+	EnableThinking *bool `json:"enable_thinking,omitempty"`
+}
+
+type chatMessage struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
+type chatCompletionRequest struct {
+	Model              string              `json:"model"`
+	Messages           []chatMessage       `json:"messages"`
+	Temperature        float32             `json:"temperature,omitempty"`
+	MaxTokens          int                 `json:"max_tokens,omitempty"`
+	ChatTemplateKwargs *chatTemplateKwargs `json:"chat_template_kwargs,omitempty"`
+}
+
+type chatCompletionResponse struct {
+	Model   string `json:"model"`
+	Choices []struct {
+		Message struct {
+			Content string `json:"content"`
+		} `json:"message"`
+	} `json:"choices"`
+	Usage struct {
+		PromptTokens     int `json:"prompt_tokens"`
+		CompletionTokens int `json:"completion_tokens"`
+	} `json:"usage"`
+}
+
 // Chat sends a chat completion request and returns the response.
 func (c *Client) Chat(ctx context.Context, req ChatRequest) (*ChatResponse, error) {
-	resp, err := c.client.CreateChatCompletion(ctx, api.ChatCompletionRequest{
+	payload := chatCompletionRequest{
 		Model: req.Model,
-		Messages: []api.ChatCompletionMessage{
-			{Role: api.ChatMessageRoleSystem, Content: req.SystemPrompt},
-			{Role: api.ChatMessageRoleUser, Content: req.UserMessage},
+		Messages: []chatMessage{
+			{Role: "system", Content: req.SystemPrompt},
+			{Role: "user", Content: req.UserMessage},
 		},
 		Temperature: float32(req.Temperature),
 		MaxTokens:   req.MaxTokens,
-	})
+	}
+
+	if req.EnableThinking != nil {
+		payload.ChatTemplateKwargs = &chatTemplateKwargs{
+			EnableThinking: req.EnableThinking,
+		}
+	}
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("marshal request: %w", err)
+	}
+
+	httpReq, err := http.NewRequestWithContext(
+		ctx,
+		http.MethodPost,
+		c.baseURL+"/chat/completions",
+		bytes.NewReader(body),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("build request: %w", err)
+	}
+
+	httpReq.Header.Set("Authorization", "Bearer "+c.apiToken)
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("chat completion failed: %w", err)
 	}
+	defer resp.Body.Close()
 
-	if len(resp.Choices) == 0 {
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		respBody, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("chat completion failed: status %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
+	}
+
+	var out chatCompletionResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, fmt.Errorf("decode response: %w", err)
+	}
+
+	if len(out.Choices) == 0 {
 		return nil, fmt.Errorf("no response choices returned")
 	}
 
 	return &ChatResponse{
-		Content:      resp.Choices[0].Message.Content,
-		Model:        resp.Model,
-		PromptTokens: resp.Usage.PromptTokens,
-		OutputTokens: resp.Usage.CompletionTokens,
+		Content:      out.Choices[0].Message.Content,
+		Model:        out.Model,
+		PromptTokens: out.Usage.PromptTokens,
+		OutputTokens: out.Usage.CompletionTokens,
 	}, nil
 }

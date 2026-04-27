@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"slices"
 	"strconv"
 	"time"
 )
@@ -16,14 +17,20 @@ type Config struct {
 	Providers       []Provider        `toml:"providers"`
 }
 
+type ModelOption struct {
+	Name           string `toml:"name"`
+	EnableThinking *bool  `toml:"enable_thinking"`
+}
+
 // Provider describes a single LLM provider configuration.
 type Provider struct {
-	Name        string   `toml:"name"`
-	BaseURL     string   `toml:"base_url"`
-	APIToken    string   `toml:"api_token"`     // Direct token value
-	APITokenEnv string   `toml:"api_token_env"` // Environment variable reference
-	RateLimit   string   `toml:"rate_limit"`
-	Models      []string `toml:"models"`
+	Name         string        `toml:"name"`
+	BaseURL      string        `toml:"base_url"`
+	APIToken     string        `toml:"api_token"`     // Direct token value
+	APITokenEnv  string        `toml:"api_token_env"` // Environment variable reference
+	RateLimit    string        `toml:"rate_limit"`
+	Models       []string      `toml:"models"`
+	ModelOptions []ModelOption `toml:"model_options"`
 }
 
 // ResolveAPIToken returns the API token using priority:
@@ -41,6 +48,15 @@ func (p *Provider) ResolveAPIToken() (string, error) {
 		return "", fmt.Errorf("environment variable %q is not set", p.APITokenEnv)
 	}
 	return "", errors.New("neither api_token nor api_token_env is specified")
+}
+
+func (p *Provider) FindModelOption(model string) *ModelOption {
+	for i := range p.ModelOptions {
+		if p.ModelOptions[i].Name == model {
+			return &p.ModelOptions[i]
+		}
+	}
+	return nil
 }
 
 // RateLimit represents a parsed rate limit value.
@@ -69,7 +85,6 @@ func ParseRateLimit(s string) (*RateLimit, error) {
 	if err != nil {
 		return nil, fmt.Errorf("invalid rate limit value: %w", err)
 	}
-
 	if value <= 0 {
 		return nil, fmt.Errorf("rate limit value must be positive, got %d", value)
 	}
@@ -99,7 +114,6 @@ func (c *Config) Validate() error {
 	if c.DefaultProvider == "" {
 		errs = append(errs, errors.New("default_provider is required"))
 	}
-
 	if len(c.Providers) == 0 {
 		errs = append(errs, errors.New("at least one provider is required"))
 	}
@@ -113,7 +127,6 @@ func (c *Config) Validate() error {
 			errs = append(errs, fmt.Errorf("provider[%d]: name is required", i))
 			continue
 		}
-
 		if providerNames[p.Name] {
 			errs = append(errs, fmt.Errorf("provider[%d]: duplicate provider name %q", i, p.Name))
 		}
@@ -126,14 +139,26 @@ func (c *Config) Validate() error {
 		if p.BaseURL == "" {
 			errs = append(errs, fmt.Errorf("provider[%d] %q: base_url is required", i, p.Name))
 		}
-
 		if p.APIToken == "" && p.APITokenEnv == "" {
 			errs = append(errs, fmt.Errorf("provider[%d] %q: either api_token or api_token_env is required", i, p.Name))
 		}
-
 		if p.RateLimit != "" {
 			if _, err := ParseRateLimit(p.RateLimit); err != nil {
 				errs = append(errs, fmt.Errorf("provider[%d] %q: %w", i, p.Name, err))
+			}
+		}
+
+		for j, mo := range p.ModelOptions {
+			if mo.Name == "" {
+				errs = append(errs, fmt.Errorf("provider[%d] %q: model_options[%d]: name is required", i, p.Name, j))
+				continue
+			}
+
+			if len(p.Models) > 0 && !slices.Contains(p.Models, mo.Name) {
+				errs = append(errs, fmt.Errorf(
+					"provider[%d] %q: model_options[%d]: model %q is not listed in models",
+					i, p.Name, j, mo.Name,
+				))
 			}
 		}
 	}
@@ -155,6 +180,5 @@ func (c *Config) Validate() error {
 	if len(errs) > 0 {
 		return errors.Join(errs...)
 	}
-
 	return nil
 }
