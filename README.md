@@ -1,83 +1,185 @@
-> # 🐟 Tuna
->
-> Dead simple prompt tuner.
+# tuna
 
-**Test and compare LLM prompts across multiple models in seconds.**
+🐟 Dead simple prompt tuner.
 
-Tuna automates prompt engineering workflows. Write your prompts, define test queries,
-and instantly see how different models respond — all from the command line.
+`tuna` helps compare how multiple LLMs respond to the same prompts. It creates an assistant workspace, generates an execution plan, runs queries against one or more models, and stores outputs in a predictable folder structure.
 
-## Why Tuna?
+## What it does
 
-Iterating on system prompts is tedious: copy-paste into chat interfaces, switch between models,
-manually compare outputs. Tuna eliminates this friction.
+- Create an assistant workspace with folders for system prompts, input prompts, and outputs.
+- Build a plan for one or more models.
+- Execute the same prompt set across multiple models.
+- Save model responses for side-by-side review.
+- Route models through configurable providers and aliases via `.tuna.toml`.
+- Optionally control provider-specific thinking behavior per model through `chat_template_kwargs.enable_thinking`.
 
-- **Organize** prompts and test queries in a simple folder structure
-- **Execute** the same queries across multiple models with one command
-- **Compare** responses side-by-side to find what works best
-
-## Quick Start
-
-```bash
-# Initialize a new assistant
-tuna init my-assistant
-
-# Edit your system prompt
-echo "You are a helpful assistant." > my-assistant/System\ prompt/fragment_001.md
-
-# Add test queries
-echo "Explain quantum computing in simple terms." > my-assistant/Input/query_001.md
-
-# Create an execution plan (use aliases or full model names)
-tuna plan my-assistant --models sonnet,gpt4
-
-# Run it
-tuna exec <plan-id>
-```
-
-Results are saved to `my-assistant/Output/<plan-id>/` for easy comparison.
-
-## Project Structure
-
-```
-my-assistant/
-├── Input/              # Your test queries
-│   └── query_001.md
-├── Output/             # Generated responses
-│   └── <plan-id>/
-│       └── <model>/
-└── System prompt/      # Prompt fragments (concatenated in order)
-    └── fragment_001.md
-```
-
-## Configuration
-
-Create `.tuna.toml` in your project root (or `~/.config/tuna.toml` for global config):
-
-```toml
-default_provider = "openrouter"
-
-[aliases]
-sonnet = "claude-sonnet-4-20250514"
-gpt4 = "gpt-4o"
-
-[[providers]]
-name = "openrouter"
-base_url = "https://openrouter.ai/api/v1"
-api_token_env = "OPENROUTER_API_KEY"  # or use api_token = "sk-..." directly
-models = ["anthropic/claude-sonnet-4", "openai/gpt-4o"]
-```
-
-See [.tuna.toml.example](.tuna.toml.example) for a complete configuration reference.
-
-## Installation
+## Install
 
 ```bash
 go install go.octolab.org/toolset/tuna@latest
 ```
 
-## License
+## Quick start
 
-MIT
+### 1. Create an assistant
 
-<p align="right">made with ❤️ for everyone by <a href="https://www.octolab.org/">OctoLab</a></p>
+```bash
+tuna init my-assistant
+```
+
+This creates a workspace like:
+
+```text
+my-assistant/
+├── System prompt/
+├── Input/
+└── Output/
+```
+
+Add your system prompt content under `System prompt/` and your test prompts under `Input/`.
+
+### 2. Create a plan
+
+```bash
+tuna plan my-assistant --models qwen3,deepseek
+```
+
+You can also tune generation settings when the plan is created:
+
+```bash
+tuna plan my-assistant \
+  --models qwen3,deepseek \
+  --temperature 0.2 \
+  --max-tokens 8000
+```
+
+`temperature` controls how deterministic or creative the responses are. `max-tokens` limits the maximum response length for each model run.
+
+### 3. Execute the plan
+
+```bash
+tuna exec my-assistant
+```
+
+Generated responses are written under the assistant's `Output/` directory.
+
+## Configuration
+
+`tuna` reads provider and alias configuration from `.tuna.toml`.
+
+Example:
+
+```toml
+default_provider = "openrouter"
+
+[aliases]
+qwen3 = "qwen/qwen3-32b"
+deepseek = "deepseek/deepseek-r1"
+gpt4o = "openai/gpt-4o"
+
+[[providers]]
+name = "openrouter"
+base_url = "https://openrouter.ai/api/v1"
+api_token_env = "OPENROUTER_API_KEY"
+rate_limit = "10rpm"
+models = [
+  "qwen/qwen3-32b",
+  "deepseek/deepseek-r1",
+  "openai/gpt-4o",
+]
+
+[[providers.model_options]]
+name = "qwen/qwen3-32b"
+enable_thinking = false
+
+[[providers.model_options]]
+name = "deepseek/deepseek-r1"
+enable_thinking = true
+```
+
+### Provider fields
+
+- `default_provider`: provider used when a model is not explicitly mapped.
+- `aliases`: short names mapped to full model identifiers.
+- `providers[].name`: logical provider name.
+- `providers[].base_url`: OpenAI-compatible API base URL.
+- `providers[].api_token` or `providers[].api_token_env`: authentication source.
+- `providers[].rate_limit`: optional rate limit such as `10rpm`, `5rps`, or `100rph`.
+- `providers[].models`: models served by that provider.
+- `providers[].model_options`: optional per-model request settings.
+
+### Per-model thinking mode
+
+For compatible gateways, `tuna` can send model-specific thinking controls in the outgoing chat-completions request:
+
+```json
+{
+  "chat_template_kwargs": {
+    "enable_thinking": false
+  }
+}
+```
+
+Use one `[[providers.model_options]]` block per model you want to override.
+
+Rules:
+
+- `name` must match a model listed in the same provider's `models` array.
+- `enable_thinking = false` disables thinking for that model.
+- `enable_thinking = true` enables thinking for that model.
+- If no `model_options` block exists for a model, `tuna` leaves `chat_template_kwargs` out of the request.
+
+## Command summary
+
+### `tuna init`
+
+Create a new assistant workspace.
+
+```bash
+tuna init my-assistant
+```
+
+### `tuna plan`
+
+Generate a plan for one or more models.
+
+```bash
+tuna plan my-assistant --models qwen3,deepseek
+```
+
+Useful flags:
+
+- `--models`: comma-separated model aliases or full model names.
+- `--temperature`: generation temperature, default `0.7`.
+- `--max-tokens`: maximum response tokens, default `4096`.
+
+### `tuna exec`
+
+Execute the current plan and save responses.
+
+```bash
+tuna exec my-assistant
+```
+
+Useful flags depend on your current version, but the main workflow is always: create an assistant, generate a plan, then execute it.
+
+## Typical workflow
+
+```bash
+tuna init okr-review
+
+# Add prompt files under:
+#   okr-review/System prompt/
+#   okr-review/Input/
+
+tuna plan okr-review --models qwen3,deepseek --temperature 0.1 --max-tokens 6000
+
+:wqtuna exec okr-review
+```
+
+## Notes
+
+- Model aliases are resolved before execution.
+- Provider routing is based on the configured `models` list and default provider.
+- Responses from all runs are stored on disk for later comparison.
+- Thinking mode is a provider-compatible extension and only affects models with explicit `model_options` configuration.
